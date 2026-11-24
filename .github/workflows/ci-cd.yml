@@ -1,0 +1,31 @@
+name: CanSat Infra CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verificar sintaxis del servicio Python
+        run: python3 -m py_compile app/server.py
+
+      - name: Construir imagen Docker cansat-web
+        run: docker build -t cansat-web:ci .
+
+      - name: Probar endpoint /health dentro del contenedor
+        run: |
+          docker run -d --name cansat-test -p 8000:8000 cansat-web:ci
+          sleep 2
+          curl -fsS http://127.0.0.1:8000/health | grep '"status": "ok"'
+          docker rm -f cansat-test
+
+      - name: Validar manifiestos YAML de Kubernetes y Ansible
+        run: |
+          python3 -c "import glob, yaml; [list(yaml.safe_load_all(open(f))) for f in glob.glob('k8s/*.yaml') + ['ansible/playbook.yml', 'docker-compose.yml']]"

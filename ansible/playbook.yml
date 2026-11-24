@@ -1,0 +1,184 @@
+---
+# Playbook Ansible: aprovisionamiento de cluster CanSat (VMs + k3s + servicios de red)
+# Servicios configurados: SSH, SFTP (chroot para logs), Nginx (LB), Postfix (Mail), Docker y k3s.
+
+- name: Configuracion base, SSH, SFTP y Docker en todos los nodos
+  hosts: cluster
+  become: true
+  tasks:
+    - name: Actualizar cache APT e instalar paquetes base
+      apt:
+        update_cache: true
+        name:
+          - curl
+          - ca-certificates
+          - gnupg
+          - openssh-server
+          - docker.io
+          - python3
+        state: present
+
+    - name: Habilitar e iniciar Docker y SSH
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - ssh
+        - docker
+
+    - name: Crear grupo y usuario SFTP dedicado para carga de logs de vuelo
+      group:
+        name: sftpusers
+        state: present
+
+    - name: Crear usuario cansat_sftp
+      user:
+        name: cansat_sftp
+        group: sftpusers
+        shell: /usr/sbin/nologin
+        create_home: false
+        password: "{{ 'cansat2026' | password_hash('sha512') }}"
+        state: present
+
+    - name: Preparar directorio chroot SFTP (/srv/cansat/logs)
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /srv/cansat, owner: root, group: root, mode: "0755" }
+        - { path: /srv/cansat/logs, owner: cansat_sftp, group: sftpusers, mode: "0775" }
+
+    - name: Configurar bloque SFTP chroot en sshd_config
+      blockinfile:
+        path: /etc/ssh/sshd_config
+        marker: "# {mark} ANSIBLE CANSAT SFTP"
+        block: |
+          Match Group sftpusers
+            ChrootDirectory /srv/cansat
+            ForceCommand internal-sftp
+            AllowTcpForwarding no
+            X11Forwarding no
+      notify: Reiniciar SSH
+
+  handlers:
+    - name: Reiniciar SSH
+      service:
+        name: ssh
+        state: restarted
+
+- name: Configurar nodo Master (k3s server, Nginx LB y Postfix Mail)
+  hosts: master
+  become: true
+  tasks:
+    - name: Preconfigurar Postfix en modo Local Only
+      debconf:
+        name: postfix
+        question: "{{ item.q }}"
+        value: "{{ item.v }}"
+        vtype: "{{ item.t }}"
+      loop:
+        - { q: postfix/main_mailer_type, v: "Local only", t: select }
+        - { q: postfix/mailname, v: "cansat.local", t: string }
+
+    - name: Instalar Nginx y Postfix + mailutils
+      apt:
+        name:
+          - nginx
+          - postfix
+          - mailutils
+        state: present
+
+    - name: Instalar k3s server en el master
+      shell: |
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--node-ip=192.168.56.10 --write-kubeconfig-mode=644" sh -
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Leer token de union de k3s
+      slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_token_raw
+
+    - name: Guardar token como fact
+      set_fact:
+        k3s_node_token: "{{ k3s_token_raw.content | b64decode | trim }}"
+
+    - name: Construir imagen Docker cansat-web e importarla a k3s
+      shell: |
+        docker build -t cansat-web:latest /vagrant
+        docker save cansat-web:latest | k3s ctr images import -
+
+    - name: Aplicar manifiestos Kubernetes del proyecto CanSat
+      shell: |
+        k3s kubectl apply -f /vagrant/k8s/namespace.yaml
+        k3s kubectl apply -f /vagrant/k8s/deployment.yaml
+        k3s kubectl apply -f /vagrant/k8s/service.yaml
+        k3s kubectl apply -f /vagrant/k8s/ingress.yaml
+
+    - name: Configurar Nginx como balanceador hacia NodePort del cluster k3s
+      copy:
+        dest: /etc/nginx/sites-available/cansat
+        content: |
+          upstream k3s_cansat {
+              server 192.168.56.10:30080;
+              server 192.168.56.11:30080;
+          }
+          server {
+              listen 80 default_server;
+              location /events {
+                  proxy_pass http://k3s_cansat;
+                  proxy_http_version 1.1;
+                  proxy_set_header Connection "";
+                  proxy_buffering off;
+              }
+              location / {
+                  proxy_pass http://k3s_cansat;
+                  proxy_set_header Host $host;
+                  add_header X-CanSat-Proxy "nginx-master" always;
+              }
+          }
+      notify: Reiniciar Nginx
+
+    - name: Activar sitio cansat en Nginx
+      file:
+        src: /etc/nginx/sites-available/cansat
+        dest: /etc/nginx/sites-enabled/default
+        state: link
+        force: true
+      notify: Reiniciar Nginx
+
+    - name: Asegurar Nginx y Postfix activos
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - nginx
+        - postfix
+
+  handlers:
+    - name: Reiniciar Nginx
+      service:
+        name: nginx
+        state: restarted
+
+- name: Unir nodo Worker al cluster k3s
+  hosts: workers
+  become: true
+  tasks:
+    - name: Instalar k3s agent apuntando al master
+      shell: |
+        curl -sfL https://get.k3s.io | K3S_URL="https://192.168.56.10:6443" \
+          K3S_TOKEN="{{ hostvars['cansat-master']['k3s_node_token'] }}" \
+          INSTALL_K3S_EXEC="--node-ip=192.168.56.11" sh -
+      args:
+        creates: /usr/local/bin/k3s-agent-uninstall.sh
+
+    - name: Importar imagen cansat-web en worker
+      shell: |
+        docker build -t cansat-web:latest /vagrant
+        docker save cansat-web:latest | k3s ctr images import -

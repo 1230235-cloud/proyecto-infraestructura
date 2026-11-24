@@ -1,0 +1,40 @@
+services:
+  cansat-web-1:
+    build: .
+    hostname: cansat-web-1
+    environment:
+      SIM_MODE: "1"
+    restart: unless-stopped
+
+  cansat-web-2:
+    build: .
+    hostname: cansat-web-2
+    environment:
+      SIM_MODE: "1"
+    restart: unless-stopped
+
+  cansat-web-3:
+    build: .
+    hostname: cansat-web-3
+    environment:
+      SIM_MODE: "1"
+    restart: unless-stopped
+
+  nginx-lb:
+    image: nginx:1.27-alpine
+    depends_on:
+      - cansat-web-1
+      - cansat-web-2
+      - cansat-web-3
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025"  # SMTP para alertas de telemetria
+      - "8025:8025"  # Interfaz webmail de pruebas
+    restart: unless-stopped

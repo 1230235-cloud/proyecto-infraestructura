@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cansat-web
+  namespace: cansat-infra
+  labels:
+    app: cansat-web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cansat-web
+  template:
+    metadata:
+      labels:
+        app: cansat-web
+    spec:
+      containers:
+        - name: cansat-web
+          image: cansat-web:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SIM_MODE
+              value: "1"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 15

@@ -136,3 +136,22 @@ sftp cansat_sftp@192.168.56.10
 vagrant ssh cansat-master -c "echo 'Autogiro desplegado a 200 m' | mail -s 'Alerta CanSat' vagrant"
 vagrant ssh cansat-master -c "mail -H"
 ```
+
+---
+
+## 6. Evidencias de ejecucion
+
+### 6.1 Contenedores activos (`healthy`) y balanceo de cargas con Nginx
+Las 3 replicas (`cansat-web-1`, `cansat-web-2`, `cansat-web-3`), `nginx-lb` y `mailpit` ejecutandose simultaneamente, junto con 6 peticiones consecutivas a `/health` demostrando la distribucion rotativa entre replicas:
+
+![Verificacion Docker Compose y balanceo de cargas](docs/evidencia-balanceo-docker.png)
+
+### 6.2 Dashboard web de telemetria servido a traves del balanceador
+Interfaz de telemetria en tiempo real (SSE) atendida a traves de Nginx (`http://localhost:8080`) indicando la replica activa (`cansat-web-1`):
+
+![Dashboard web CanSat a traves de Nginx](docs/evidencia-dashboard.png)
+
+### 6.3 Servicio de correo (SMTP / Mailpit) recibiendo alertas de mision
+Recepcion de correo de alerta enviado por SMTP (`puerto 1025`) desde el contenedor `cansat-web-1` hacia el servidor de correo (`http://localhost:8025`):
+
+![Servicio de correo Mailpit con alerta CanSat](docs/evidencia-mailpit.png)
